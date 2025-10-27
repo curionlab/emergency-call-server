@@ -1,0 +1,257 @@
+const express = require('express');
+const webpush = require('web-push');
+const cors = require('cors');
+const fs = require('fs').promises;
+const path = require('path');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// データファイルパス
+const DATA_FILE = path.join(__dirname, 'data.json');
+
+// VAPID設定（環境変数から取得、なければデフォルト）
+const vapidKeys = {
+    publicKey: process.env.VAPID_PUBLIC_KEY || '__REDACTED_VAPID_PUBLIC_KEY__',
+    privateKey: process.env.VAPID_PRIVATE_KEY || '__REDACTED_VAPID_PRIVATE_KEY__'
+};
+
+webpush.setVapidDetails(
+    'mailto:emergency@example.com',
+    vapidKeys.publicKey,
+    vapidKeys.privateKey
+);
+
+// データ読み込み
+async function loadData() {
+    try {
+        const data = await fs.readFile(DATA_FILE, 'utf8');
+        return JSON.parse(data);
+    } catch (error) {
+        // ファイルがない場合は初期データ
+        return {
+            authCodes: {},
+            registrations: {}
+        };
+    }
+}
+
+// データ保存
+async function saveData(data) {
+    await fs.writeFile(DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+// ヘルスチェック
+app.get('/', (req, res) => {
+    res.json({
+        status: 'ok',
+        service: 'Emergency Call System',
+        version: '2.0',
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
+});
+
+// 認証コード生成API
+app.post('/generate-auth-code', async (req, res) => {
+    try {
+        const { receiverId } = req.body;
+        
+        if (!receiverId) {
+            return res.status(400).json({
+                success: false,
+                error: 'receiverIdが必要です'
+            });
+        }
+        
+        // 6桁の認証コード生成
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // データ読み込み
+        const data = await loadData();
+        
+        // 認証コード保存（30分有効）
+        data.authCodes[receiverId] = {
+            code: code,
+            expires: Date.now() + 30 * 60 * 1000,
+            createdAt: new Date().toISOString()
+        };
+        
+        await saveData(data);
+        
+        console.log(`[認証コード生成] ${receiverId} -> ${code}`);
+        
+        res.json({
+            success: true,
+            code: code,
+            expiresIn: '30分'
+        });
+        
+    } catch (error) {
+        console.error('認証コード生成エラー:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 受信者登録API
+app.post('/register', async (req, res) => {
+    try {
+        const { receiverId, authCode, subscription } = req.body;
+        
+        if (!receiverId || !authCode || !subscription) {
+            return res.status(400).json({
+                success: false,
+                error: '必須パラメータが不足しています'
+            });
+        }
+        
+        // データ読み込み
+        const data = await loadData();
+        
+        // 認証コード検証
+        const storedAuth = data.authCodes[receiverId];
+        
+        if (!storedAuth) {
+            return res.status(401).json({
+                success: false,
+                error: '認証コードが見つかりません'
+            });
+        }
+        
+        if (storedAuth.code !== authCode) {
+            return res.status(401).json({
+                success: false,
+                error: '認証コードが正しくありません'
+            });
+        }
+        
+        if (storedAuth.expires < Date.now()) {
+            // 期限切れの認証コードを削除
+            delete data.authCodes[receiverId];
+            await saveData(data);
+            
+            return res.status(401).json({
+                success: false,
+                error: '認証コードの有効期限が切れています'
+            });
+        }
+        
+        // 受信者登録
+        data.registrations[receiverId] = {
+            subscription: subscription,
+            registeredAt: new Date().toISOString()
+        };
+        
+        // 使用済み認証コードを削除
+        delete data.authCodes[receiverId];
+        
+        await saveData(data);
+        
+        console.log(`[受信者登録成功] ${receiverId}`);
+        
+        res.json({
+            success: true,
+            message: '登録が完了しました'
+        });
+        
+    } catch (error) {
+        console.error('受信者登録エラー:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// プッシュ通知送信API
+app.post('/send-notification', async (req, res) => {
+    try {
+        const { receiverId, sessionId, senderId, title, body } = req.body;
+        
+        if (!receiverId || !sessionId) {
+            return res.status(400).json({
+                success: false,
+                error: '必須パラメータが不足しています'
+            });
+        }
+        
+        // データ読み込み
+        const data = await loadData();
+        
+        // 受信者の購読情報取得
+        const registration = data.registrations[receiverId];
+        
+        if (!registration) {
+            return res.status(404).json({
+                success: false,
+                error: '受信者が登録されていません'
+            });
+        }
+        
+        // 通知ペイロード作成
+        const payload = JSON.stringify({
+            title: title || '🚨 緊急コール',
+            body: body || '緊急通話が開始されました',
+            sessionId: sessionId,
+            senderId: senderId,
+            url: process.env.CLIENT_URL || 'https://your-client-url.com',
+            timestamp: Date.now()
+        });
+        
+        // プッシュ通知送信
+        await webpush.sendNotification(registration.subscription, payload);
+        
+        console.log(`[通知送信成功] ${receiverId} (セッション: ${sessionId})`);
+        
+        res.json({
+            success: true,
+            message: '通知を送信しました',
+            sessionId: sessionId
+        });
+        
+    } catch (error) {
+        console.error('通知送信エラー:', error);
+        
+        // 購読が無効な場合は削除
+        if (error.statusCode === 410) {
+            const data = await loadData();
+            delete data.registrations[req.body.receiverId];
+            await saveData(data);
+            console.log(`[購読削除] ${req.body.receiverId}`);
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 登録状況確認API（デバッグ用）
+app.get('/status', async (req, res) => {
+    try {
+        const data = await loadData();
+        res.json({
+            authCodesCount: Object.keys(data.authCodes).length,
+            registrationsCount: Object.keys(data.registrations).length,
+            authCodes: Object.keys(data.authCodes),
+            registrations: Object.keys(data.registrations)
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// サーバー起動
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 緊急コールサーバー起動: http://localhost:${PORT}`);
+    console.log(`📡 VAPID公開鍵: ${vapidKeys.publicKey}`);
+});
