@@ -6,8 +6,15 @@ const path = require('path');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-app.use(cors());
 app.use(express.json());
+// --- CORS設定を強化 ---
+const corsOptions = {
+    origin: '__your-client-url__', // あなたのクライアントのURLのみを許可
+    methods: ['GET', 'POST'], // 許可するHTTPメソッド
+    allowedHeaders: ['Content-Type', 'Authorization'], // 許可するリクエストヘッダー
+    optionsSuccessStatus: 200 // プリフライトリクエストに200を返す
+};
+app.use(cors(corsOptions));
 
 // --- 設定値 (環境変数から取得) ---
 const DATA_FILE = path.join(__dirname, 'data.json');
