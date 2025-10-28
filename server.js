@@ -21,8 +21,7 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'default-password'; // 発信者ログイン用パスワード
 const JWT_SECRET = process.env.JWT_SECRET || 'default-jwt-secret-key';   // トークン署名用の秘密鍵
 
-// 発信者用API
-const API_KEY = process.env.SECRET_API_KEY || 'default-insecure-key-please-change';
+const VAPID_CONTACT_EMAIL = process.env.VAPID_CONTACT_EMAIL || 'mailto:emergency@example.com';
 
 // VAPID設定（環境変数から取得、なければデフォルト）
 const vapidKeys = {
@@ -31,7 +30,7 @@ const vapidKeys = {
 };
 
 webpush.setVapidDetails(
-    'mailto:emergency@example.com',
+    VAPID_CONTACT_EMAIL,
     vapidKeys.publicKey,
     vapidKeys.privateKey
 );
