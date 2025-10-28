@@ -3,13 +3,16 @@ const webpush = require('web-push');
 const cors = require('cors');
 const fs = require('fs').promises;
 const path = require('path');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// データファイルパス
+// --- 設定値 (環境変数から取得) ---
 const DATA_FILE = path.join(__dirname, 'data.json');
+const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'default-password'; // 発信者ログイン用パスワード
+const JWT_SECRET = process.env.JWT_SECRET || 'default-jwt-secret-key';   // トークン署名用の秘密鍵
 
 // 発信者用API
 const API_KEY = process.env.SECRET_API_KEY || 'default-insecure-key-please-change';
@@ -57,6 +60,119 @@ app.get('/', (req, res) => {
 
 app.get('/health', (req, res) => {
     res.json({ status: 'ok' });
+});
+
+// --- 新しいエンドポイント: /login ---
+app.post('/login', (req, res) => {
+    const { password } = req.body;
+    if (password === LOGIN_PASSWORD) {
+        // ログイン成功時、1時間有効な一時トークンを生成
+        const token = jwt.sign({ authorized: true }, JWT_SECRET, { expiresIn: '1h' });
+        res.json({ success: true, token: token });
+        log('発信者のログイン成功、トークンを発行しました。');
+    } else {
+        res.status(401).json({ success: false, error: 'Invalid password' });
+        log('発信者のログイン失敗: パスワードが不正です。', 'error');
+    }
+});
+
+
+// --- トークン検証ミドルウェア ---
+function verifyToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // "Bearer <token>" 形式
+
+    if (!token) {
+        return res.status(401).json({ success: false, error: 'Unauthorized: No token provided' });
+    }
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+            return res.status(403).json({ success: false, error: 'Forbidden: Invalid token' });
+        }
+        req.user = user;
+        next();
+    });
+}
+
+
+// プッシュ通知送信API
+app.post('/send-notification', verifyToken, async (req, res) => {
+    try {
+        const { receiverId, sessionId, senderId, title, body } = req.body;
+        
+        if (!receiverId || !sessionId) {
+            return res.status(400).json({
+                success: false,
+                error: '必須パラメータが不足しています'
+            });
+        }
+        
+        // データ読み込み
+        const data = await loadData();
+        
+        // 受信者の購読情報取得
+        const registration = data.registrations[receiverId];
+        
+        if (!registration) {
+            return res.status(404).json({
+                success: false,
+                error: '受信者が登録されていません'
+            });
+        }
+        
+        // 通知ペイロード作成
+        const payload = JSON.stringify({
+            title: title || '🚨 緊急コール',
+            body: body || '緊急通話が開始されました',
+            sessionId: sessionId,
+            senderId: senderId,
+            url: process.env.CLIENT_URL || 'https://your-client-url.com',
+            timestamp: Date.now()
+        });
+        
+        // プッシュ通知送信
+        await webpush.sendNotification(registration.subscription, payload);
+        
+        console.log(`[通知送信成功] ${receiverId} (セッション: ${sessionId})`);
+        
+        res.json({
+            success: true,
+            message: '通知を送信しました',
+            sessionId: sessionId
+        });
+        
+    } catch (error) {
+        console.error('通知送信エラー:', error);
+        
+        // 購読が無効な場合は削除
+        if (error.statusCode === 410) {
+            const data = await loadData();
+            delete data.registrations[req.body.receiverId];
+            await saveData(data);
+            console.log(`[購読削除] ${req.body.receiverId}`);
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// 登録状況確認API（デバッグ用）
+app.get('/status', async (req, res) => {
+    try {
+        const data = await loadData();
+        res.json({
+            authCodesCount: Object.keys(data.authCodes).length,
+            registrationsCount: Object.keys(data.registrations).length,
+            authCodes: Object.keys(data.authCodes),
+            registrations: Object.keys(data.registrations)
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // 認証コード生成API
@@ -173,91 +289,6 @@ app.post('/register', async (req, res) => {
     }
 });
 
-// プッシュ通知送信API
-app.post('/send-notification', async (req, res) => {
-    // --- APIキー認証の追加 ---
-    const providedApiKey = req.headers['x-api-key'];
-    if (providedApiKey !== API_KEY) {
-        log(`不正なAPIキーによるアクセスが拒否されました: ${providedApiKey}`, 'error');
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-    }
-
-    try {
-        const { receiverId, sessionId, senderId, title, body } = req.body;
-        
-        if (!receiverId || !sessionId) {
-            return res.status(400).json({
-                success: false,
-                error: '必須パラメータが不足しています'
-            });
-        }
-        
-        // データ読み込み
-        const data = await loadData();
-        
-        // 受信者の購読情報取得
-        const registration = data.registrations[receiverId];
-        
-        if (!registration) {
-            return res.status(404).json({
-                success: false,
-                error: '受信者が登録されていません'
-            });
-        }
-        
-        // 通知ペイロード作成
-        const payload = JSON.stringify({
-            title: title || '🚨 緊急コール',
-            body: body || '緊急通話が開始されました',
-            sessionId: sessionId,
-            senderId: senderId,
-            url: process.env.CLIENT_URL || 'https://your-client-url.com',
-            timestamp: Date.now()
-        });
-        
-        // プッシュ通知送信
-        await webpush.sendNotification(registration.subscription, payload);
-        
-        console.log(`[通知送信成功] ${receiverId} (セッション: ${sessionId})`);
-        
-        res.json({
-            success: true,
-            message: '通知を送信しました',
-            sessionId: sessionId
-        });
-        
-    } catch (error) {
-        console.error('通知送信エラー:', error);
-        
-        // 購読が無効な場合は削除
-        if (error.statusCode === 410) {
-            const data = await loadData();
-            delete data.registrations[req.body.receiverId];
-            await saveData(data);
-            console.log(`[購読削除] ${req.body.receiverId}`);
-        }
-        
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-// 登録状況確認API（デバッグ用）
-app.get('/status', async (req, res) => {
-    try {
-        const data = await loadData();
-        res.json({
-            authCodesCount: Object.keys(data.authCodes).length,
-            registrationsCount: Object.keys(data.registrations).length,
-            authCodes: Object.keys(data.authCodes),
-            registrations: Object.keys(data.registrations)
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
 
 // サーバー起動
 const PORT = process.env.PORT || 3000;
@@ -265,3 +296,6 @@ app.listen(PORT, () => {
     console.log(`🚀 緊急コールサーバー起動: http://localhost:${PORT}`);
     console.log(`📡 VAPID公開鍵: ${vapidKeys.publicKey}`);
 });
+
+// --- ログ関数 (簡略化のため、既存のものをそのまま使用) ---
+function log(msg, type = 'info') { console.log(`[${type}] ${msg}`); }
