@@ -11,6 +11,9 @@ app.use(express.json());
 // データファイルパス
 const DATA_FILE = path.join(__dirname, 'data.json');
 
+// 発信者用API
+const API_KEY = process.env.SECRET_API_KEY || 'default-insecure-key-please-change';
+
 // VAPID設定（環境変数から取得、なければデフォルト）
 const vapidKeys = {
     publicKey: process.env.VAPID_PUBLIC_KEY || '__REDACTED_VAPID_PUBLIC_KEY__',
@@ -172,6 +175,13 @@ app.post('/register', async (req, res) => {
 
 // プッシュ通知送信API
 app.post('/send-notification', async (req, res) => {
+    // --- APIキー認証の追加 ---
+    const providedApiKey = req.headers['x-api-key'];
+    if (providedApiKey !== API_KEY) {
+        log(`不正なAPIキーによるアクセスが拒否されました: ${providedApiKey}`, 'error');
+        return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
     try {
         const { receiverId, sessionId, senderId, title, body } = req.body;
         
