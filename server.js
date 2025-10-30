@@ -9,7 +9,7 @@ const app = express();
 app.use(express.json());
 // --- CORS設定を強化 ---
 const corsOptions = {
-    origin: '__your-client-url__', // あなたのクライアントのURLのみを許可
+    origin: process.env.CLIENT_URL, // あなたのクライアントのURLのみを許可
     methods: ['GET', 'POST'], // 許可するHTTPメソッド
     allowedHeaders: ['Content-Type', 'Authorization'], // 許可するリクエストヘッダー
     optionsSuccessStatus: 200 // プリフライトリクエストに200を返す
@@ -20,6 +20,8 @@ app.use(cors(corsOptions));
 const DATA_FILE = path.join(__dirname, 'data.json');
 const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'default-password'; // 発信者ログイン用パスワード
 const JWT_SECRET = process.env.JWT_SECRET || 'default-jwt-secret-key';   // トークン署名用の秘密鍵
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'default-refresh-secret'; // リフレッシュトークン用の秘密鍵
+
 
 const raw = process.env.VAPID_CONTACT_EMAIL?.trim();
 const VAPID_CONTACT_EMAIL = raw ? `mailto:${raw}` : 'mailto:emergency@example.com';
@@ -281,11 +283,17 @@ app.post('/register', async (req, res) => {
         await saveData(data);
         
         console.log(`[受信者登録成功] ${receiverId}`);
-        
-        res.json({
-            success: true,
+
+        // アクセストークンとリフレッシュトークンを生成
+        const accessToken = jwt.sign({ receiverId: receiverId }, JWT_SECRET, { expiresIn: '15m' });
+        const refreshToken = jwt.sign({ receiverId: receiverId }, REFRESH_TOKEN_SECRET, { expiresIn: '30d' });
+
+        res.json({ 
+            success: true, 
+            accessToken, 
+            refreshToken,
             message: '登録が完了しました'
-        });
+         }); // 2つのトークンを返す
         
     } catch (error) {
         console.error('受信者登録エラー:', error);
@@ -294,6 +302,24 @@ app.post('/register', async (req, res) => {
             error: error.message
         });
     }
+});
+
+// --- 新しいエンドポイント: /refresh-token を追加 ---
+// (これは /register や /login の後に追加してください)
+app.post('/refresh-token', (req, res) => {
+    const { token } = req.body;
+    if (!token) return res.sendStatus(401);
+
+    jwt.verify(token, REFRESH_TOKEN_SECRET, (err, user) => {
+        if (err) {
+            log('無効なリフレッシュトークンが使用されました。', 'warning');
+            return res.sendStatus(403); // Forbidden
+        }
+        // 新しいアクセストークンを発行
+        const newAccessToken = jwt.sign({ receiverId: user.receiverId }, JWT_SECRET, { expiresIn: '15m' });
+        res.json({ accessToken: newAccessToken });
+        log(`トークンをリフレッシュしました: ${user.receiverId}`);
+    });
 });
 
 
