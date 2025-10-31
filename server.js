@@ -38,6 +38,7 @@ webpush.setVapidDetails(
     vapidKeys.privateKey
 );
 
+
 // データ読み込み
 async function loadData() {
     try {
@@ -85,6 +86,10 @@ app.post('/login', (req, res) => {
     }
 });
 
+// VAPID PUBLIC KEYをクライアントに渡す
+app.get('/vapid-public-key', (req, res) => {
+    res.json({ publicKey: vapidKeys.publicKey });
+});
 
 // --- トークン検証ミドルウェア ---
 function verifyToken(req, res, next) {
