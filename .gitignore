@@ -1,4 +1,5 @@
 node_modules/
 data.json
 .env
+.env.production
 npm-debug.log

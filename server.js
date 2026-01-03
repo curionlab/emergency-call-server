@@ -1,3 +1,5 @@
+// server.js
+require('dotenv').config({ quiet: true });
 const express = require('express');
 const webpush = require('web-push');
 const cors = require('cors');
@@ -7,29 +9,59 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(express.json());
+
+/**
+ * 必須環境変数チェック（未設定なら起動しない）
+ */
+const REQUIRED_ENV_VARS = [
+    'LOGIN_PASSWORD',
+    'JWT_SECRET',
+    'REFRESH_TOKEN_SECRET',
+    'VAPID_PUBLIC_KEY',
+    'VAPID_PRIVATE_KEY',
+    'VAPID_CONTACT_EMAIL',
+    'CLIENT_URL',
+  ];
+
+const missing = REQUIRED_ENV_VARS.filter((name) => !process.env[name]);
+if (missing.length > 0) {
+// 起動時に落として「必ず環境変数を設定させる」
+console.error(
+    'Missing required environment variables:',
+    missing.join(', ')
+);
+console.error(
+    'Please create a .env based on .env.example and set the above variables.'
+);
+process.exit(1);
+}
+
 // --- CORS設定を強化 ---
 const corsOptions = {
-    origin: process.env.CLIENT_URL, // あなたのクライアントのURLのみを許可
-    methods: ['GET', 'POST'], // 許可するHTTPメソッド
-    allowedHeaders: ['Content-Type', 'Authorization'], // 許可するリクエストヘッダー
-    optionsSuccessStatus: 200 // プリフライトリクエストに200を返す
-};
-app.use(cors(corsOptions));
+    origin: process.env.CLIENT_URL, // 必須
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    optionsSuccessStatus: 200,
+  };
+  app.use(cors(corsOptions));
 
-// --- 設定値 (環境変数から取得) ---
+// --- 永続化用ファイル ---
 const DATA_FILE = path.join(__dirname, 'data.json');
-const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD || 'default-password'; // 発信者ログイン用パスワード
-const JWT_SECRET = process.env.JWT_SECRET || 'default-jwt-secret-key';   // トークン署名用の秘密鍵
-const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'default-refresh-secret'; // リフレッシュトークン用の秘密鍵
 
+// --- セキュリティ関連 ---
+const LOGIN_PASSWORD = process.env.LOGIN_PASSWORD;
+const JWT_SECRET = process.env.JWT_SECRET;
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET;
 
-const raw = process.env.VAPID_CONTACT_EMAIL?.trim();
-const VAPID_CONTACT_EMAIL = raw ? `mailto:${raw}` : 'mailto:emergency@example.com';
+// --- VAPID設定 ---
+const rawContact = process.env.VAPID_CONTACT_EMAIL.trim();
+const VAPID_CONTACT_EMAIL = rawContact.startsWith('mailto:')
+  ? rawContact
+  : `mailto:${rawContact}`;
 
-// VAPID設定（環境変数から取得、なければデフォルト）
 const vapidKeys = {
-    publicKey: process.env.VAPID_PUBLIC_KEY || '__REDACTED_VAPID_PUBLIC_KEY__',
-    privateKey: process.env.VAPID_PRIVATE_KEY || '__REDACTED_VAPID_PRIVATE_KEY__'
+  publicKey: process.env.VAPID_PUBLIC_KEY,
+  privateKey: process.env.VAPID_PRIVATE_KEY,
 };
 
 webpush.setVapidDetails(
@@ -38,6 +70,10 @@ webpush.setVapidDetails(
     vapidKeys.privateKey
 );
 
+// ログ関数
+function log(msg, type = 'info') {
+    console.log(`[${type}] ${msg}`);
+}
 
 // データ読み込み
 async function loadData() {
@@ -72,43 +108,53 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok' });
 });
 
-// --- 新しいエンドポイント: /login ---
+
+// --- シンプルなログイン（管理用） ---
 app.post('/login', (req, res) => {
     const { password } = req.body;
-    if (password === LOGIN_PASSWORD) {
-        // ログイン成功時、1時間有効な一時トークンを生成
-        const token = jwt.sign({ authorized: true }, JWT_SECRET, { expiresIn: '1h' });
-        res.json({ success: true, token: token });
-        log('発信者のログイン成功、トークンを発行しました。');
-    } else {
-        res.status(401).json({ success: false, error: 'Invalid password' });
-        log('発信者のログイン失敗: パスワードが不正です。', 'error');
+    if (password !== LOGIN_PASSWORD) {
+      log('Invalid login password', 'warn');
+      return res
+        .status(401)
+        .json({ success: false, error: 'Invalid password' });
     }
-});
+
+    // ログイン成功時、1時間有効な一時トークンを生成
+    const token = jwt.sign({ authorized: true }, JWT_SECRET, {
+      expiresIn: '1h',
+    });
+  
+    res.json({ success: true, token });
+    log('Admin login success');
+  });
+
 
 // VAPID PUBLIC KEYをクライアントに渡す
 app.get('/vapid-public-key', (req, res) => {
     res.json({ publicKey: vapidKeys.publicKey });
 });
 
-// --- トークン検証ミドルウェア ---
+// --- JWT検証ミドルウェア（管理系API保護用） ---
 function verifyToken(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // "Bearer <token>" 形式
-
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.split(' ')[1]; // "Bearer xxx"
+  
     if (!token) {
-        return res.status(401).json({ success: false, error: 'Unauthorized: No token provided' });
+      return res
+        .status(401)
+        .json({ success: false, error: 'Unauthorized: No token provided' });
     }
-
+  
     jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) {
-            return res.status(403).json({ success: false, error: 'Forbidden: Invalid token' });
-        }
-        req.user = user;
-        next();
+      if (err) {
+        return res
+          .status(403)
+          .json({ success: false, error: 'Forbidden: Invalid token' });
+      }
+      req.user = user;
+      next();
     });
-}
-
+  }
 
 // プッシュ通知送信API
 app.post('/send-notification', verifyToken, async (req, res) => {
@@ -118,7 +164,7 @@ app.post('/send-notification', verifyToken, async (req, res) => {
         if (!receiverId || !sessionId) {
             return res.status(400).json({
                 success: false,
-                error: '必須パラメータが不足しています'
+                error: 'receiverId and sessionId are required'
             });
         }
         
@@ -128,43 +174,42 @@ app.post('/send-notification', verifyToken, async (req, res) => {
         // 受信者の購読情報取得
         const registration = data.registrations[receiverId];
         
-        if (!registration) {
+        if (!registration || !registration.subscription) {
             return res.status(404).json({
                 success: false,
-                error: '受信者が登録されていません'
+                error: 'Receiver not registered'
             });
         }
         
         // 通知ペイロード作成
         const payload = JSON.stringify({
-            title: title || '🚨 緊急コール',
-            body: body || '緊急通話が開始されました',
+            title: title || '🚨 Emergency Call',
+            body: body || 'You have a new emergency call.',
             sessionId: sessionId,
             senderId: senderId,
-            url: process.env.CLIENT_URL || 'https://your-client-url.com',
+            url: process.env.CLIENT_URL,
             timestamp: Date.now()
         });
         
         // プッシュ通知送信
         await webpush.sendNotification(registration.subscription, payload);
         
-        console.log(`[通知送信成功] ${receiverId} (セッション: ${sessionId})`);
-        
+        log(`Notification sent to receiverId=${receiverId}, sessionId=${sessionId}`);
+
         res.json({
             success: true,
-            message: '通知を送信しました',
-            sessionId: sessionId
-        });
-        
-    } catch (error) {
-        console.error('通知送信エラー:', error);
+            message: 'Notification sent',
+            sessionId,
+          });
+        } catch (error) {
+            console.error('[send-notification] error:', error.message);
         
         // 購読が無効な場合は削除
         if (error.statusCode === 410) {
             const data = await loadData();
             delete data.registrations[req.body.receiverId];
             await saveData(data);
-            console.log(`[購読削除] ${req.body.receiverId}`);
+            log(`Cleaned up stale registration for ${req.body.receiverId}`, 'info');
         }
         
         res.status(500).json({
@@ -197,7 +242,7 @@ app.post('/generate-auth-code', async (req, res) => {
         if (!receiverId) {
             return res.status(400).json({
                 success: false,
-                error: 'receiverIdが必要です'
+                error: 'receiverId is required'
             });
         }
         
@@ -216,7 +261,7 @@ app.post('/generate-auth-code', async (req, res) => {
         
         await saveData(data);
         
-        console.log(`[認証コード生成] ${receiverId} -> ${code}`);
+        log(`Auth code generated for receiverId=${receiverId} code=${code}`);
         
         res.json({
             success: true,
@@ -225,7 +270,7 @@ app.post('/generate-auth-code', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('認証コード生成エラー:', error);
+        console.error('[generate-auth-code] error:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -241,7 +286,7 @@ app.post('/register', async (req, res) => {
         if (!receiverId || !authCode || !subscription) {
             return res.status(400).json({
                 success: false,
-                error: '必須パラメータが不足しています'
+                error: 'receiverId, authCode and subscription are required',
             });
         }
         
@@ -254,14 +299,14 @@ app.post('/register', async (req, res) => {
         if (!storedAuth) {
             return res.status(401).json({
                 success: false,
-                error: '認証コードが見つかりません'
+                error: 'No auth code found'
             });
         }
         
         if (storedAuth.code !== authCode) {
             return res.status(401).json({
                 success: false,
-                error: '認証コードが正しくありません'
+                error: 'Invalid auth code'
             });
         }
         
@@ -272,7 +317,7 @@ app.post('/register', async (req, res) => {
             
             return res.status(401).json({
                 success: false,
-                error: '認証コードの有効期限が切れています'
+                error: 'Auth code expired' 
             });
         }
         
@@ -287,21 +332,24 @@ app.post('/register', async (req, res) => {
         
         await saveData(data);
         
-        console.log(`[受信者登録成功] ${receiverId}`);
+        log(`Receiver registered: ${receiverId}`);
 
         // アクセストークンとリフレッシュトークンを生成
-        const accessToken = jwt.sign({ receiverId: receiverId }, JWT_SECRET, { expiresIn: '15m' });
-        const refreshToken = jwt.sign({ receiverId: receiverId }, REFRESH_TOKEN_SECRET, { expiresIn: '30d' });
+        const accessToken = jwt.sign({ receiverId: receiverId }, JWT_SECRET, { 
+            expiresIn: '15m',
+        });
+        const refreshToken = jwt.sign({ receiverId: receiverId }, REFRESH_TOKEN_SECRET, {
+            expiresIn: '30d',
+        });
 
         res.json({ 
             success: true, 
             accessToken, 
             refreshToken,
-            message: '登録が完了しました'
+            message: 'Receiver registered',
          }); // 2つのトークンを返す
-        
     } catch (error) {
-        console.error('受信者登録エラー:', error);
+        console.error('[register] error:', error);
         res.status(500).json({
             success: false,
             error: error.message
@@ -309,21 +357,27 @@ app.post('/register', async (req, res) => {
     }
 });
 
-// --- 新しいエンドポイント: /refresh-token を追加 ---
-// (これは /register や /login の後に追加してください)
+// --- アクセストークン更新 ---
 app.post('/refresh-token', (req, res) => {
     const { token } = req.body;
+
     if (!token) return res.sendStatus(401);
 
     jwt.verify(token, REFRESH_TOKEN_SECRET, (err, user) => {
         if (err) {
-            log('無効なリフレッシュトークンが使用されました。', 'warning');
+            log('[refresh-token] invalid token', 'warn');
             return res.sendStatus(403); // Forbidden
         }
+
         // 新しいアクセストークンを発行
-        const newAccessToken = jwt.sign({ receiverId: user.receiverId }, JWT_SECRET, { expiresIn: '15m' });
+        const newAccessToken = jwt.sign(
+            { receiverId: user.receiverId }, 
+            JWT_SECRET, 
+            { expiresIn: '15m' }
+        );
+        
         res.json({ accessToken: newAccessToken });
-        log(`トークンをリフレッシュしました: ${user.receiverId}`);
+        log(`[refresh-token] issued for receiverId=${user.receiverId}`);
     });
 });
 
@@ -331,9 +385,6 @@ app.post('/refresh-token', (req, res) => {
 // サーバー起動
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 緊急コールサーバー起動: http://localhost:${PORT}`);
-    console.log(`📡 VAPID公開鍵: ${vapidKeys.publicKey}`);
+    console.log(`🚀 Server listening on http://localhost:${PORT}`);
+    console.log(`📡 VAPID public key: ${vapidKeys.publicKey}`);
 });
-
-// --- ログ関数 (簡略化のため、既存のものをそのまま使用) ---
-function log(msg, type = 'info') { console.log(`[${type}] ${msg}`); }
