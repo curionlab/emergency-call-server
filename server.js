@@ -357,6 +357,50 @@ app.post('/register', async (req, res) => {
     }
 });
 
+// ... 既存の app.post('/register', ...) の後などに追加 ...
+
+/**
+ * 購読更新API (authCode不要、refreshTokenで本人確認)
+ */
+app.post('/update-subscription', async (req, res) => {
+    try {
+      const { receiverId, refreshToken, subscription } = req.body;
+      if (!receiverId || !refreshToken || !subscription) {
+        return res.status(400).json({ success: false, error: 'Missing parameters' });
+      }
+  
+      // refreshToken の検証
+      let decoded;
+      try {
+        decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+      } catch (err) {
+        return res.status(401).json({ success: false, error: 'Invalid refresh token' });
+      }
+  
+      if (!decoded || decoded.receiverId !== receiverId) {
+        return res.status(403).json({ success: false, error: 'Forbidden: ID mismatch' });
+      }
+  
+      const data = await loadData();
+      
+      // 既存の登録情報を更新（または新規作成）
+      data.registrations[receiverId] = {
+        subscription,
+        updatedAt: new Date().toISOString(),
+        registeredAt: data.registrations[receiverId]?.registeredAt || new Date().toISOString()
+      };
+      
+      await saveData(data);
+      log(`Subscription auto-updated for receiverId=${receiverId}`);
+  
+      return res.json({ success: true });
+    } catch (e) {
+      console.error('[update-subscription] error:', e);
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  
 // --- アクセストークン更新 ---
 app.post('/refresh-token', (req, res) => {
     const { token } = req.body;
